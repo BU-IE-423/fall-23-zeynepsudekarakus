@@ -1,0 +1,260 @@
+---
+title: "Task2"
+output: html_notebook
+---
+
+In this task, **R** was used and AKBNK-ISCTR and AKBNK-YKNBK pairs, which are among the highly correlated stocks determined in Task 1, were used.
+
+When incorporating time series analysis, there are various model options available, such as ARIMA models and Vector Auto-Regressive (VAR) models. For our pairs trading strategy, we have chosen to use the Vector Error Correction Model (VECM), an extension of the Vector Auto-Regressive (VAR) model, based on research. This modeling approach gives reliable estimates for multiple time series with long-term equilibrium relationships. The VECM assumes the existence of at least one cointegrating relationship, and with the Johansen Procedure, which will be employed below, we confirm that our pairs are cointegrated.*
+
+*Schmidt, Arlen David. "Pairs Trading: A Cointegration Approach." Honours Thesis, Discipline of Finance, 2009. University of Sydney. https://ses.library.usyd.edu.au/handle/2123/4072
+
+
+```{r}
+#Initially, data is read from CSV files using the readr library.
+library(readr)
+excel1 <- read_csv("C:/Users/lenovo/Downloads/20180101_20231121_bist30/20191230_20200329_bist30.csv", show_col_types = FALSE)
+excel2 <- read_csv("C:/Users/lenovo/Downloads/20180101_20231121_bist30/20200330_20200628_bist30.csv", show_col_types = FALSE)
+excel3 <- read_csv("C:/Users/lenovo/Downloads/20180101_20231121_bist30/20200629_20200927_bist30.csv", show_col_types = FALSE)
+excel4 <- read_csv("C:/Users/lenovo/Downloads/20180101_20231121_bist30/20200928_20201227_bist30.csv", show_col_types = FALSE)
+
+#The tidyverse library is loaded, and the spread function is used to pivot each read dataset. This transforms the data from long to wide format.
+
+install.packages("tidyverse")
+library(tidyverse)
+
+excel1_wide <- spread(excel1, key = short_name, value = price)
+excel2_wide <- spread(excel2, key = short_name, value = price)
+excel3_wide <- spread(excel3, key = short_name, value = price)
+excel4_wide <- spread(excel4, key = short_name, value = price)
+
+
+# The rbind function is used to concatenate all the widened datasets, creating a new dataset named all_data.
+all_data <- rbind(excel1_wide, excel2_wide, excel3_wide, excel4_wide)
+print(all_data)
+
+
+```
+**PAIR1: AKBNK - VAKBN**
+
+```{r}
+#A new dataset named selected_columns is created, containing only the "timestamp," "VAKBN," and "AKBNK" columns.
+selected_columns <- all_data[, c("timestamp", "VAKBN", "AKBNK")]
+print(selected_columns)
+```
+
+```{r}
+#Differences in prices ("VAKBN" and "AKBNK") are calculated using the diff function, resulting in "VAKBN_diff" and "AKBNK_diff."
+selected_columns$VAKBN_diff <- c(NA, diff(selected_columns$VAKBN))
+selected_columns$AKBNK_diff <- c(NA, diff(selected_columns$AKBNK))
+
+```
+
+The appropriate lag value to create the model is determined using the “VARselect” function, and then the cointegration model is fitted using  the “ca.jo “function. According to the output ,the null hypthesis stating that there is no cointegration relationship is rejected.
+
+```{r}
+#The vars and urca libraries are loaded. A VAR model is applied to the differenced series, and a cointegration test is conducted.
+install.packages("vars")
+library(vars)
+install.packages("urca")
+library(urca)
+
+diff_data <- data.frame(data1 = selected_columns$VAKBN_diff , data2 = selected_columns$AKBNK_diff )
+diff_data<-na.omit(diff_data)
+
+var_select <- VARselect(diff_data, lag.max = 25, type = "both")
+lags<-var_select$selection["AIC(n)"]
+
+co_test <- ca.jo(diff_data, type = "trace", K = lags, ecdet = "const")
+summary(co_test)
+
+```
+The vector error correction model is fitted by taking the “r” parameter(representing the number of cointegration relationships) 1 from the previous cointegration model output. The spread between the two stocks is calculated using the formula from vector error correction model equations: w_t= p_(1,t)  -βˆp_(2,t)*. “vecm$beta[1:2]” extracts the first two coefficients from the estimated VECM coefficients 
+* https://jduras.github.io/files/teaching/eco5316/lec21slides.pdf 
+```{r}
+#The spread is calculated using the VECM model, and a time series plot is generated to visualize the results.
+vecm <- cajorls(co_test, r = 1)
+diff_data_matrix <- as.matrix(diff_data)
+spread <- diff_data_matrix %*% vecm$beta[1:2]
+plot.ts(spread)
+
+selected_columns<-na.omit(selected_columns)
+combined_data <- cbind(selected_columns, spread)
+
+```
+The Z-score of the spread is calculated to analyze how many standard deviations it is from the mean. The treshold value is defined according to 1 sigma limits.
+
+```{r}
+# Z-scores are computed, and reservoirs exceeding predetermined threshold values (-1 and 1) are filtered out.
+combined_data$z_score <- (combined_data$spread- mean(combined_data$ spread)) / sd(combined_data$ spread)
+
+upper_limit <- 1 
+lower_limit <- -1
+out_of_control <- combined_data[combined_data$z_score > upper_limit | combined_data$z_score < lower_limit, ]
+ 
+#Print out-of-control residuals, timestamps, and stock prices
+print(out_of_control[, c("timestamp", "z_score", "VAKBN", "AKBNK")])
+```
+```{r}
+#A plot of the Z-score is generated, with out-of-control reservoirs highlighted in a specific color and size.
+library(ggplot2)
+ggplot(combined_data, aes(x = timestamp, y = z_score)) +
+  geom_line(color = "blue") +
+  labs(title = "Residuals Z-Score",
+       x = "Index",
+       y = "Z-Score") +
+  theme_minimal() +
+
+  geom_point(data = out_of_control, aes(x = timestamp, y = z_score), color = "red", size = 3)
+
+
+```
+Considering mean reversion tendencies, which stocks to sell and buy can be determined. The spread formula was previously calculated as: w_t= p_(1,t)  -βˆp_(2,t)*.
+The algorithm used is the same as the one in task 1.When the spread exceeds the control limit, it indicates that the first stock in the pair is higher than the test value. To generate profits, the strategy involves selling the high-value stock and buying the low-value stock
+
+```{r}
+#Initial capital, the number of shares bought for AKBNK and YKBNK, and other variables are defined. A for loop is utilized to implement the pairs trading strategy.The results are printed on the screen, including initial capital, final capital, and profit percentage.
+     money <- 1
+     VAKBN_shares_bought <- 0
+     AKBNK_shares_bought <- 0
+      
+          for (i in seq_along(combined_data$z_score)) {
+                  # Buy signal for AKBNK
+                  if (combined_data$z_score[i] > 0) {
+                          if (VAKBN_shares_bought > 0) {
+                                  money <- money + VAKBN_shares_bought * combined_data$VAKBN[i]
+                                  VAKBN_shares_bought <- 0
+                              }
+                          if (money > 0 && combined_data$z_score[i] > 1) {
+                                  AKBNK_shares_bought <- money / combined_data$AKBNK[i]
+                                  money <- 0
+                              }
+                        # Buy signal for YKBNK
+                      } else if (combined_data$z_score[i] < 0) {
+                              if (AKBNK_shares_bought > 0) {
+                                      money <- money + AKBNK_shares_bought * combined_data$AKBNK[i]
+                                     AKBNK_shares_bought <- 0
+                                  }
+                              if (money > 0 && combined_data$z_score[i] < -1) {
+                                      VAKBN_shares_bought <- money / combined_data$VAKBN[i]
+                                      money <- 0
+                                 }
+                     
+                     
+                          }
+              }
+     
+          money <- money + VAKBN_shares_bought * combined_data$VAKBN[length(combined_data$z_score)] + AKBNK_shares_bought * combined_data$AKBNK[length(combined_data$z_score)]
+         
+              cat(sprintf("AKBNK-VAKBN pair trading:\nStarting money: 1\nFinal money: %.2f\nProfit: %.2f%%\n", money, (money - 1) * 100))
+
+```
+**PAIR2 : ISCTR-AKBNK**
+```{r}
+#A new dataset named selected_columns is created, containing only the "timestamp," "ISCTR," and "AKBNK" columns.
+selected_columns <- all_data[, c("timestamp", "ISCTR", "AKBNK")]
+print(selected_columns)
+```
+
+```{r}
+#Differences in prices ("ISCTR" and "AKBNK") are calculated using the diff function, resulting in "ISCTR_diff" and "AKBNK_diff."
+selected_columns$ISCTR_diff <- c(NA, diff(selected_columns$ISCTR))
+selected_columns$AKBNK_diff <- c(NA, diff(selected_columns$AKBNK))
+```
+
+```{r}
+# VAR model is applied to the differenced series, and a cointegration test is conducted.
+
+diff_data <- data.frame(data1 = selected_columns$ISCTR_diff , data2 = selected_columns$AKBNK_diff )
+diff_data<-na.omit(diff_data)
+
+var_select <- VARselect(diff_data, lag.max = 25, type = "both")
+lags<-var_select$selection["AIC(n)"]
+
+co_test <- ca.jo(diff_data, type = "trace", K = lags, ecdet = "const")
+summary(co_test)
+
+```
+
+```{r}
+#The spread is calculated using the VECM model, and a time series plot is generated to visualize the results.
+vecm <- cajorls(co_test, r = 1)
+diff_data_matrix <- as.matrix(diff_data)
+spread <- diff_data_matrix %*% vecm$beta[1:2]
+plot.ts(spread)
+
+selected_columns<-na.omit(selected_columns)
+combined_data <- cbind(selected_columns, spread)
+
+```
+
+```{r}
+# Z-scores are computed, and reservoirs exceeding predetermined threshold values (-1 and 1) are filtered out.
+combined_data$z_score <- (combined_data$spread- mean(combined_data$ spread)) / sd(combined_data$ spread)
+
+upper_limit <- 1 
+lower_limit <- -1
+out_of_control <- combined_data[combined_data$z_score > upper_limit | combined_data$z_score < lower_limit, ]
+ 
+#Print out-of-control residuals, timestamps, and stock prices
+print(out_of_control[, c("timestamp", "z_score", "ISCTR", "AKBNK")])
+```
+
+```{r}
+#A plot of the Z-score is generated, with out-of-control reservoirs highlighted in a specific color and size.
+
+ggplot(combined_data, aes(x = timestamp, y = z_score)) +
+  geom_line(color = "blue") +
+  labs(title = "Residuals Z-Score",
+       x = "Index",
+       y = "Z-Score") +
+  theme_minimal() +
+
+  geom_point(data = out_of_control, aes(x = timestamp, y = z_score), color = "red", size = 3)
+```
+
+```{r}
+#Initial capital, the number of shares bought for AKBNK and YKBNK, and other variables are defined. A for loop is utilized to implement the pairs trading strategy.The results are printed on the screen, including initial capital, final capital, and profit percentage.
+     money <- 1
+     ISCTR_shares_bought <- 0
+     AKBNK_shares_bought <- 0
+      
+          for (i in seq_along(combined_data$z_score)) {
+                  # Buy signal for AKBNK
+                  if (combined_data$z_score[i] > 0) {
+                          if (ISCTR_shares_bought > 0) {
+                                  money <- money + ISCTR_shares_bought * combined_data$ISCTR[i]
+                                  ISCTR_shares_bought <- 0
+                              }
+                          if (money > 0 && combined_data$z_score[i] > 1) {
+                                  AKBNK_shares_bought <- money / combined_data$AKBNK[i]
+                                  money <- 0
+                              }
+                        # Buy signal for ISCTR
+                      } else if (combined_data$z_score[i] < 0) {
+                              if (AKBNK_shares_bought > 0) {
+                                      money <- money + AKBNK_shares_bought * combined_data$AKBNK[i]
+                                     AKBNK_shares_bought <- 0
+                                  }
+                              if (money > 0 && combined_data$z_score[i] < -1) {
+                                      ISCTR_shares_bought <- money / combined_data$ISCTR[i]
+                                      money <- 0
+                                 }
+                     
+                     
+                          }
+              }
+     
+          money <- money + ISCTR_shares_bought * combined_data$ISCTR[length(combined_data$z_score)] + AKBNK_shares_bought * combined_data$AKBNK[length(combined_data$z_score)]
+         
+              cat(sprintf("AKBNK-ISCTR pair trading:\nStarting money: 1\nFinal money: %.2f\nProfit: %.2f%%\n", money, (money - 1) * 100))
+```
+**ANALYSIS & DISCUSSION**
+
+
+When applying a more advanced trading strategy that integrates time series analysis to the pairs selected in Task 1, we begin with the belief that we can more accurately determine their relationships and build a stronger foundation for the trading strategy. After calculating the z-score values of residuals and defining control limits, we observe from the resulting graph that we receive a significant number of signals. These signals indicate deviations from the price relationship, implying that an investor trading with pairs would want to sell the stock with high performance and buy the one with lower performance. As a result, compared to the model established in Task 1, this model generates more trading transactions.
+According to the results of the trading simulation we prepared, it is seen that when the AKBNK-VAKBN pair trading takes place with the initial capital of 1, one year later it becomes 1.18 TL, yielding a profit of 17.82%. This profit increases up to 79.22% when trading the AKBNK-ISCTR pair, resulting in the initial capital of 1 TL becoming 1.79 TL after one year.
+In both pairs, a higher profit is achieved compared to the profit obtained in Task 1 (AKBNK-ISCTR yielded 5.04%, and AKBNK-VAKBN yielded 22.90%). When looking at this sample, we find the second model to be more successful compored to other.
+
+Vector Error Correction Model is more complex to implement and interpret compared to the linear regression approach of task 1. The performance of the model is sensitive to the choice of parameters and incorrect parameters might lead to overfitting and inaccurate results. On the other hand, since it focuses on time dependencies and cointegration, long-term relationships can be captured more accurately.
+
